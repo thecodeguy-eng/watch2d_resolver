@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: watch2d-resolver
+    runtime: docker
+    plan: free           # free tier (sleeps after 15 min — keep warm with UptimeRobot)
+    healthCheckPath: /
+    autoDeploy: true
