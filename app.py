@@ -14,7 +14,7 @@ Run locally:
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
 import re
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, urljoin
 
 import requests
 from fastapi import FastAPI
@@ -120,8 +120,18 @@ def _resolve_downloadwella(landing_url, parsed):
 
 
 def _resolve_loadedfiles(landing_url, parsed):
-    """loadedfiles.org checks Referer AND a session cookie; warm up first."""
-    dbg = {}
+    """
+    loadedfiles.org uses a multi-step token chain:
+        file page  ->  ?pt=A page  ->  ?pt=B page  ->  302 redirect to the CDN file
+
+    We follow that chain server-side (same session, real Referer) and return the
+    final off-loadedfiles CDN URL — so the app downloads directly, no ad page,
+    just like downloadwella. The on-page 20s countdown is cosmetic and does not
+    gate the redirect.
+
+    Falls back to the deepest ?pt= link (website-equivalent) if the CDN redirect
+    isn't reached.
+    """
     HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -131,40 +141,59 @@ def _resolve_loadedfiles(landing_url, parsed):
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    NEXT_PATTERNS = [
+        r"var\s+downloadUrl\s*=\s*['\"](https?://[^'\"]+)['\"]",
+        r"window\.location(?:\.href)?\s*=\s*['\"](https?://[^'\"]+\?pt=[^'\"]+)['\"]",
+        r"['\"](https?://loadedfiles\.org/[^'\"]+\?pt=[^'\"]+)['\"]",
+    ]
     try:
         session = requests.Session()
         session.headers.update(HEADERS)
 
-        home_url = f"{parsed.scheme}://{parsed.netloc}/"
+        # Warm up a session cookie from the homepage.
         try:
-            session.get(home_url, timeout=10, allow_redirects=True)
+            session.get(f"{parsed.scheme}://{parsed.netloc}/", timeout=10,
+                        allow_redirects=True)
         except Exception:
             pass  # non-fatal
 
-        resp = session.get(landing_url, timeout=15, allow_redirects=True,
-                           headers={"Referer": "https://9jarocks.net/"})
-        if resp.status_code != 200:
-            return None
-        html = resp.text
+        referer = "https://9jarocks.net/"
+        current = landing_url
+        last_pt = None
 
-        m = re.search(
-            r"var\s+downloadUrl\s*=\s*['\"]"
-            r"(https?://[^'\"]+\?pt=[^'\"]+)['\"]", html, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
+        for _ in range(6):
+            resp = session.get(current, timeout=15, allow_redirects=False,
+                               headers={"Referer": referer})
+            code = resp.status_code
 
-        m = re.search(
-            r"window\.location(?:\.href)?\s*=\s*['\"]"
-            r"(https?://[^'\"]+\?pt=[^'\"]+)['\"]", html, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
+            # A redirect off loadedfiles.org is the real CDN file link.
+            if code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("Location", "")
+                if not loc:
+                    break
+                target = urljoin(current, loc)
+                if "loadedfiles.org" not in urlparse(target).netloc.lower():
+                    return target  # ← direct CDN download URL
+                referer, current = current, target
+                continue
 
-        m = re.search(
-            r"['\"](https?://loadedfiles\.org/[^'\"]+\?pt=[^'\"]+)['\"]",
-            html, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-        return None
+            if code != 200:
+                break
+
+            html = resp.text
+            nxt = None
+            for pat in NEXT_PATTERNS:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m:
+                    nxt = m.group(1).strip()
+                    break
+            if not nxt or nxt == current:
+                break
+            if "?pt=" in nxt:
+                last_pt = nxt
+            referer, current = current, nxt
+
+        return last_pt  # website-equivalent fallback (or None)
     except Exception:
         return None
 
@@ -216,19 +245,22 @@ def _resolve(landing_url: str) -> str:
     if "sabishares.com" in host and "preview" in parsed.query:
         return urlunparse(parsed._replace(query="", fragment=""))
 
-    # already direct
-    if "?pt=" in lower or any(lower.endswith(ext) for ext in DIRECT_EXTS):
-        return landing_url
-
-    # passthrough hosts
-    if "mylulutv.com" in host:
-        return landing_url
-
+    # Host-specific scrapers FIRST. Their file *pages* often end in .mkv / .html,
+    # so they must run before the "looks like a direct file" shortcut below —
+    # otherwise a loadedfiles "/<id>/<name>.mkv" page is mistaken for the file.
     if "downloadwella.com" in host:
         return _resolve_downloadwella(landing_url, parsed) or landing_url
 
     if "loadedfiles.org" in host:
         return _resolve_loadedfiles(landing_url, parsed) or landing_url
+
+    # passthrough host
+    if "mylulutv.com" in host:
+        return landing_url
+
+    # already a direct/token link (true CDN files)
+    if "?pt=" in lower or any(lower.endswith(ext) for ext in DIRECT_EXTS):
+        return landing_url
 
     # generic HTML fetch + extract
     html, _ = _fetch_html_safe(landing_url)
