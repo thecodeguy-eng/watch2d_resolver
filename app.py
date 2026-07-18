@@ -157,7 +157,7 @@ def _resolve_loadedfiles(landing_url, parsed):
         except Exception:
             pass  # non-fatal
 
-        referer = "https://9jarocks.net/"
+        referer = "https://my9jarocks.bz/"
         current = landing_url
         last_pt = None
 
