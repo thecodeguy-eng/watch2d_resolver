@@ -144,7 +144,7 @@ def _resolve_loadedfiles(landing_url, parsed):
     NEXT_PATTERNS = [
         r"var\s+downloadUrl\s*=\s*['\"](https?://[^'\"]+)['\"]",
         r"window\.location(?:\.href)?\s*=\s*['\"](https?://[^'\"]+\?pt=[^'\"]+)['\"]",
-        r"['\"](https?://loadedfiles\.org/[^'\"]+\?pt=[^'\"]+)['\"]",
+        r"['\"](https?://loadedfiles\.[a-z]{2,}/[^'\"]+\?pt=[^'\"]+)['\"]",
     ]
     try:
         session = requests.Session()
@@ -157,7 +157,7 @@ def _resolve_loadedfiles(landing_url, parsed):
         except Exception:
             pass  # non-fatal
 
-        referer = "https://my9jarocks.bz/"
+        referer = "https://www.my9jarocks.bz/"
         current = landing_url
         last_pt = None
 
@@ -172,7 +172,7 @@ def _resolve_loadedfiles(landing_url, parsed):
                 if not loc:
                     break
                 target = urljoin(current, loc)
-                if "loadedfiles.org" not in urlparse(target).netloc.lower():
+                if "loadedfiles." not in urlparse(target).netloc.lower():
                     return target  # ← direct CDN download URL
                 referer, current = current, target
                 continue
@@ -251,7 +251,7 @@ def _resolve(landing_url: str) -> str:
     if "downloadwella.com" in host:
         return _resolve_downloadwella(landing_url, parsed) or landing_url
 
-    if "loadedfiles.org" in host:
+    if "loadedfiles." in host:
         return _resolve_loadedfiles(landing_url, parsed) or landing_url
 
     # passthrough host
