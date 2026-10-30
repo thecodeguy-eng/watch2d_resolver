@@ -13,6 +13,7 @@ Run locally:
     pip install -r requirements.txt
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
+import json
 import re
 from urllib.parse import urlparse, urlunparse, urljoin
 
@@ -119,6 +120,31 @@ def _resolve_downloadwella(landing_url, parsed):
         return None
 
 
+def _resolve_meetdownload(landing_url, parsed):
+    """meetdownload pages carry a one-time ticket; POST it to the page's
+    /api/v1/dl-link/<token> and un-XOR the base64 `d` field with key `k`
+    (same as the site's dl-link.js)."""
+    try:
+        import base64
+        scraper = _get_scraper()
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        html = scraper.get(landing_url, timeout=12).text
+        api = re.search(r'data-md-dl="([^"]+)"', html)
+        ticket = re.search(r'data-md-t="([^"]+)"', html)
+        if not api or not ticket:
+            return None
+        data = scraper.post(base + api.group(1), data={"t": ticket.group(1)}, timeout=15,
+                            headers={"Referer": landing_url,
+                                     "X-Requested-With": "XMLHttpRequest"}).json()
+        if not data.get("ok") or not data.get("k") or not data.get("d"):
+            return None
+        key, raw = data["k"], base64.b64decode(data["d"])
+        url = "".join(chr(b ^ ord(key[i % len(key)])) for i, b in enumerate(raw))
+        return url if url.startswith("http") else None
+    except Exception:
+        return None
+
+
 def _resolve_loadedfiles(landing_url, parsed):
     """
     loadedfiles.org uses a multi-step token chain:
@@ -145,6 +171,9 @@ def _resolve_loadedfiles(landing_url, parsed):
         r"var\s+downloadUrl\s*=\s*['\"](https?://[^'\"]+)['\"]",
         r"window\.location(?:\.href)?\s*=\s*['\"](https?://[^'\"]+\?pt=[^'\"]+)['\"]",
         r"['\"](https?://loadedfiles\.[a-z]{2,}/[^'\"]+\?pt=[^'\"]+)['\"]",
+        # 2026 redesign: Alpine.js widget `x-data="{ ... link: '...' }"`, with
+        # the link JSON/unicode-escaped (: for ':') — decoded below.
+        r"\blink:\s*'([^']+)'",
     ]
     try:
         session = requests.Session()
@@ -189,6 +218,11 @@ def _resolve_loadedfiles(landing_url, parsed):
                     break
             if not nxt or nxt == current:
                 break
+            if "\\" in nxt:
+                try:
+                    nxt = json.loads('"' + nxt + '"')
+                except ValueError:
+                    pass
             if "?pt=" in nxt:
                 last_pt = nxt
             referer, current = current, nxt
@@ -253,6 +287,9 @@ def _resolve(landing_url: str) -> str:
 
     if "loadedfiles." in host:
         return _resolve_loadedfiles(landing_url, parsed) or landing_url
+
+    if "meetdownload.com" in host:
+        return _resolve_meetdownload(landing_url, parsed) or landing_url
 
     # passthrough host
     if "mylulutv.com" in host:
